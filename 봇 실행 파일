@@ -1,0 +1,52 @@
+# api사용을 위한 데이터들
+import discord
+from discord.ext import commands
+from dotenv import load_dotenv
+import os
+
+# 기능 파일들
+from censor import censorship
+
+
+# .env 파일 로드
+load_dotenv()
+
+# .env 파일에서 토큰 가져오기
+TOKEN = os.getenv("token")
+
+# Intents 설정 (모든 메시지를 읽기 위해 message_content 활성화)
+intents = discord.Intents.all()
+
+# 봇 초기화
+bot = commands.Bot(command_prefix="!", intents=intents)
+
+@bot.event
+async def on_ready():
+    print(f"Logged in as {bot.user}")
+
+@bot.event
+async def on_message(message):
+    # 봇 자신이 보낸 메시지는 무시
+    if message.author == bot.user:
+        return
+
+    # 메시지 내용 출력
+    print(f"채팅 감지: {message.author}: {message.content}")
+
+    toxic = int(censorship(message.content)*100)
+    if toxic >= 50:
+        await message.delete()
+        await message.channel.send(f"부적절한 표현이 감지되었습니다.")
+
+    # 특정 키워드에 응답
+    if "안녕" in message.content:
+        await message.channel.send(f"{message.author.mention}, 안녕하세요!")
+
+    # 명령어와 충돌 방지
+    await bot.process_commands(message)
+
+# 봇 실행
+if TOKEN:
+    bot.run(TOKEN)
+else:
+    print("Error: DISCORD_BOT_TOKEN이 설정되지 않았습니다.")
