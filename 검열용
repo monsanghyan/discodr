@@ -1,0 +1,38 @@
+import requests # pip install requests 하기
+import json
+
+# Perspective API 키 (발급받은 API 키를 여기에 넣으세요)
+API_KEY = 'AIzaSyDN9uGo32uuTxAR2Upw4xalVw4mciPmYkU'
+
+# Perspective API 엔드포인트 URL
+url = 'https://commentanalyzer.googleapis.com/v1alpha1/comments:analyze?key=' + API_KEY
+
+def censorship(text_to_analyze): # 분석할 텍스트
+    # 요청할 데이터 준비
+    data = {
+        "comment": {
+            "text": text_to_analyze  # 분석할 텍스트
+        },
+        "languages": ["ko"],  # 한국어로 설정
+        "requestedAttributes": {
+            "TOXICITY": {},  # 부정적인 언어를 분석
+        }
+    }
+
+    # API 요청 보내기
+    response = requests.post(url, json=data)
+
+    # 응답 확인
+    if response.status_code == 200:
+        # 응답을 JSON 형식으로 파싱
+        result = response.json()
+
+        # TOXICITY 점수 추출
+        toxicity_score = result["attributeScores"]["TOXICITY"]["summaryScore"]["value"]
+
+        # 출력
+        return toxicity_score
+
+    else:
+        # 오류 메시지 출력
+        print(f"Error: {response.status_code}")
