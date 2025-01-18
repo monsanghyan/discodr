@@ -1,7 +1,7 @@
 # api사용을 위한 데이터들
 import discord
-from discord.ext import commands
-from dotenv import load_dotenv
+from discord import app_commands    # pip install discord.py
+from dotenv import load_dotenv      # pip install python-dotenv
 import os
 
 # 기능 파일들
@@ -14,39 +14,67 @@ load_dotenv()
 # .env 파일에서 토큰 가져오기
 TOKEN = os.getenv("token")
 
-# Intents 설정 (모든 메시지를 읽기 위해 message_content 활성화)
-intents = discord.Intents.all()
+if not TOKEN:
+    raise ValueError("TOKEN이 설정되지 않았습니다. .env 파일을 확인하세요.")
 
-# 봇 초기화
-bot = commands.Bot(command_prefix="!", intents=intents)
+bandict = {}
 
-@bot.event
-async def on_ready():
-    print(f"Logged in as {bot.user}")
+class MyBot(discord.Client):
+    def __init__(self):
+        super().__init__(intents=discord.Intents.all())
+        self.tree = app_commands.CommandTree(self)  # 슬래시 명령어 등록용
 
-@bot.event
-async def on_message(message):
-    # 봇 자신이 보낸 메시지는 무시
-    if message.author == bot.user:
-        return
+    async def on_ready(self):
+        print(f"Logged in as {self.user}")
+        await self.tree.sync()  # 명령어를 Discord에 동기화
+        print("Slash commands have been synced.")
 
-    # 메시지 내용 출력
-    print(f"채팅 감지: {message.author}: {message.content}")
+    async def on_message(self, message):
+        global bandict
+        # 봇 자신이 보낸 메시지는 무시
+        if message.author == self.user:
+            return
 
-    toxic = int(censorship(message.content)*100)
-    if toxic >= 50:
-        await message.delete()
-        await message.channel.send(f"부적절한 표현이 감지되었습니다.")
+        # 밴당한 상태(평판이 -)라면 채팅 금지
+        if message.author in bandict and bandict[message.author] > 20:
+            await message.delete()
+            await message.author.send(f"채팅이 금지되었습니다.")
 
-    # 특정 키워드에 응답
-    if "안녕" in message.content:
-        await message.channel.send(f"{message.author.mention}, 안녕하세요!")
+        # 메시지 내용 출력
+        print(f"채팅 감지: {message.author}: {message.content}")
 
-    # 명령어와 충돌 방지
-    await bot.process_commands(message)
+        toxic = int(censorship(message.content) * 100)
+        if toxic >= 50:
+            await message.delete()
+            if message.author in bandict:
+                bandict[message.author] += toxic // 10
+            else:
+                bandict[message.author] = toxic // 10
+            await message.channel.send(f"부적절한 표현이 감지되었습니다.")
+            await message.channel.send(f"현재 평판 {20-bandict[message.author]}입니다.")
+            if 20-bandict[message.author] < 0:
+                await message.channel.send(f"{message.author}님 채팅이 금지되었습니다.")
+
+
+
+
+# 봇 객체 생성
+client = MyBot()
+
+# 슬래시 명령어에 뒤에 값을 받도록 수정
+@client.tree.command(name="jump")  # 슬래시 명령어: /jump
+@app_commands.describe(name="이름을 입력하세요")  # 설명 추가
+async def jump_command(interaction: discord.Interaction, name: str):
+    await interaction.response.send_message(f"안녕하세요, {name}님! {interaction.user.name}님이 명령어를 실행했습니다.")
+
+@client.tree.command(name="내평판")
+async def reputation(clients: discord.Interaction):
+    if clients.user in bandict:
+        score = 20-bandict[clients.user]
+        await clients.channel.send(f"20점 만점에 {score}점 입니다")
+    else:
+        await clients.channel.send("20점 만점에 20점 입니다. ")
+
 
 # 봇 실행
-if TOKEN:
-    bot.run(TOKEN)
-else:
-    print("Error: DISCORD_BOT_TOKEN이 설정되지 않았습니다.")
+client.run(TOKEN)
