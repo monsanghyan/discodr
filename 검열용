@@ -1,4 +1,4 @@
-import requests # pip install requests 하기
+import requests
 import json
 
 # Perspective API 키 (발급받은 API 키를 여기에 넣으세요)
