@@ -7,9 +7,13 @@
 # api사용을 위한 데이터들
 import discord
 from discord import app_commands
+from discord.ext import commands, tasks
 from dotenv import load_dotenv
 import os
+
+
 from datetime import datetime
+import time
 
 # 기능 파일들
 from censor import censorship
@@ -24,79 +28,130 @@ TOKEN = os.getenv("token")
 if not TOKEN:
     raise ValueError("TOKEN이 설정되지 않았습니다. .env 파일을 확인하세요.")
 
+# 밴당한 리스트 {밴당한 사용자:[평판, 밴 시간, 밴 횟수]
 bandict = {}
-now_hour = datetime.now().strftime("%H")
 
 class MyBot(discord.Client):
     def __init__(self):
         super().__init__(intents=discord.Intents.all())
         self.tree = app_commands.CommandTree(self)  # 슬래시 명령어 등록용
 
+    # 실행했을때 명령어를 Discord에 동기화
     async def on_ready(self):
         print(f"Logged in as {self.user}")
-        await self.tree.sync()  # 명령어를 Discord에 동기화
+        await self.tree.sync()
         print("Slash commands have been synced.")
 
+    # 매새지를 받을때마다 실행
     async def on_message(self, message):
         global bandict
+
+        # 필요한 변수 목록
+        writer = message.author
+        toxic = int(censorship(message.content)*100)
+        ban_standard = 50
+        ban_time = 30
+        reputation_standard = 20
+
         # 봇 자신이 보낸 메시지는 무시
-        if message.author == self.user:
+        if writer == self.user:
             return
 
-        # 밴당한 상태(평판이 -)라면 채팅 금지
-        if message.author in bandict and bandict[message.author] > 20:
+        if isinstance(message.channel, discord.DMChannel):
+            # DM에서는 메시지 삭제가 불가능하므로 다른 처리를 추가하거나 리턴
+            return
+
+        # 평판이 깎인전적이 있고 밴당한 상태라면 채팅 금지
+        if writer in bandict and bandict[writer][0] > reputation_standard:
             await message.delete()
-            await message.author.send(f"채팅이 금지되었습니다.")
+            await writer.send(f"채팅이 금지되었습니다.")
+            return
 
         # 메시지 내용 출력
-        print(f"채팅 감지: {message.author}: {message.content}")
+        print(f"채팅 감지: {writer}: {message.content}")
 
         # 검열
-        toxic = int(censorship(message.content) * 100)
         print(toxic)
-        if toxic >= 50:
+        if toxic >= ban_standard:
             await message.delete()
-            if message.author in bandict:
-                bandict[message.author] += toxic // 10
+
+            # 평판 조정
+            if writer in bandict:
+                bandict[writer][0] += toxic // 10
             else:
-                bandict[message.author] = toxic // 10
+                bandict[writer] = [toxic // 10]
+
+            # 검열 매세지 출력
             await message.channel.send(f"부적절한 표현이 감지되었습니다.")
-            await message.channel.send(f"현재 평판 {20-bandict[message.author]}입니다.")
-            if 20-bandict[message.author] < 0:
-                await message.channel.send(f"{message.author}님 채팅이 금지되었습니다.")
+            await message.channel.send(f"현재 평판 {reputation_standard-bandict[writer][0]}입니다.")
 
+            # 만일 평판이 음수라면 밴
+            if reputation_standard-bandict[writer][0] < 0:
+                await message.channel.send(f"{writer}님 채팅이 30분동안 금지되었습니다.")
 
+                # 밴 시간 및 횟수 추가
+                if len(bandict[writer]) > 1:
+                    bandict[writer][2] += 1
+                    bandict[writer][1] += ban_time * bandict[writer][2]
 
+                else:
+                    bandict[writer].append(ban_time)
+                    bandict[writer].append(1)
+
+                # 밴 타이머 가동
+                if not 반복_작업.is_running():  # 작업이 실행 중이 아닌 경우 시작
+                    반복_작업.start()
 
 # 봇 객체 생성
 client = MyBot()
 
-# 슬래시 명령어에 뒤에 값을 받도록 수정
-@client.tree.command(name="jump")  # 슬래시 명령어: /jump
-@app_commands.describe(name="이름을 입력하세요")  # 설명 추가
-async def jump_command(interaction: discord.Interaction, name: str):
-    await interaction.response.send_message(f"안녕하세요, {name}님! {interaction.user.name}님이 명령어를 실행했습니다.")
-
+"""명령어 모음"""
 # 평판 확인하는 명령어
 @client.tree.command(name="내평판")
 async def reputation(clients: discord.Interaction):
     if clients.user in bandict:
-        score = 20-bandict[clients.user]
+        score = 20-bandict[clients.user][0]
         if score < 0:
-            await clients.response.send_message(f"20점 만점에 {score}점 입니다."+"\n"+"몇시간후 다시 채팅을 입력할 수 있습니다.", ephemeral=True)
+            await clients.response.send_message(f"20점 만점에 {score}점 입니다."+"\n"+f"{bandict[clients.user][1]}분 후 다시 채팅을 입력할 수 있습니다.", ephemeral=True)
         else:
             await clients.response.send_message(f"20점 만점에 {score}점 입니다", ephemeral=True)
 
     else:
         await clients.response.send_message("20점 만점에 20점 입니다. ", ephemeral=True)
 
-# 개인 디엠 확인
-@client.tree.command(name="시간")
+# 밴 해재시간에 대한 정보 제공
+@client.tree.command(name="해재시간")
 async def time(it):
-    now = datetime.now().strftime("%H")
-    await it.response.send_message(f"{now}", ephemeral=True)
+    hour, minute = map(int, datetime.now().strftime("%H %M").split())
+    if it.user in bandict and bandict[it.user][1] != 0:
+        await it.response.send_message(f"{(hour + (minute + bandict[it.user][1])//60) % 12}:{(minute + bandict[it.user][1]) % 60}에 해재됩니다.", ephemeral=True)
+    else:
+        await it.response.send_message("매세지밴을 당하지 않으셨습니다. ")
+        
+# 밴시간 확인 및 해제
+@tasks.loop(minutes=1)
+async def 반복_작업():
+    global bandict
 
+    # 밴당한 사람이 있나 확인
+    swith = True
 
+    # 채널 확인
+    channel = client.get_channel(1327466682943541342)  # 여기에 디스코드 채널 ID를 입력
+    if channel:
+
+        # 1분마다 밴 시간 1씩 감소
+        for i in bandict.keys():
+            if bandict[i][1] > 0:
+                swith = False
+            bandict[i][1] -= 1
+            if bandict[i][1] == 0:
+                bandict[i][0] = 0
+                await channel.send(f"{i}님 채팅 금지가 해제되었습니다.")
+
+        # 더이상 밴당한 사람이 없다면 중지
+        if swith:
+            반복_작업.stop()
 
 # 봇 실행
 client.run(TOKEN)
