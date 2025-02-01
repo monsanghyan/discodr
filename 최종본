@@ -1,0 +1,691 @@
+import discord
+from discord import app_commands
+from dotenv import load_dotenv
+from discord.ext import commands, tasks
+import datetime
+import os
+import requests
+from discord.ui import View, Select, Button
+import asyncio
+from censor import censorship
+
+# 토큰
+# TOKEN = os.getenv("token")
+
+'''
+- 수업 등록한 사람들한테만 보이는 메세지
+- 수업 자동 등록 기능
+- 학생 이름 기준으로 강의, 반 추가
+- 'Roles': 이름, 파이썬 오전반, 등등등
+- 출결 관리
+- 학생, 강사 기능 구분 
+- 강의 시작, 끝, 쉬는 시간 타이머
+- 백준, 프로그래머스 푼 문제 개수 출력
+- 강퇴, 경고 부여
+- 지각시 멘션
+'''
+
+lecture = {}
+lecture_attendance = {}
+students = {}
+teachers = {}
+warning_stack = {}
+classes = {}
+now = datetime.datetime.now()
+dt = datetime.datetime.strptime(str(now), "%Y-%m-%d %H:%M:%S.%f")
+formatted_dt = dt.strftime("%Y-%m-%d, %H:%M")
+
+teachers["Teacher1"] = '철수쌤'
+teachers["Teacher2"] = '영희쌤'
+teachers["Teacher3"] = '민수쌤'
+
+students["student1"] = "홍길동"
+students["student2"] = "김철수"
+students["student3"] = "이영희"
+
+lecture_attendance['rlawhtpq'] = {'present': 1, 'absent': 2, 'late': 3}
+
+load_dotenv()
+
+intents = discord.Intents.all()
+bot = commands.Bot(command_prefix='/', intents=intents)
+
+# .env 파일 로드
+load_dotenv()
+
+# 변수 목록(수치 조절을 위한, 혹은 전역에서 사용되어야 하는 변수)
+bandict = {}  # 밴당한 리스트 {밴당한 사용자:[평판, 밴 시간, 밴 횟수]
+ban_standard = 50  # 메세지를 검열할 기준
+ban_time = 30  # 기본 채팅 검열 시간(분단위)
+reputation_standard = 20  # 기본 평판 점수
+reputation_regeneration = 30  # 평판 회복 속도(분단위)
+
+
+class MyBot(discord.Client):
+    def __init__(self):
+        super().__init__(intents=discord.Intents.all())
+        self.tree = app_commands.CommandTree(self)  # 슬래시 명령어 등록용
+
+    # 실행했을때 명령어를 Discord에 동기화
+    async def on_ready(self):
+        print(f"Logged in as {self.user}")
+        await self.tree.sync()
+        print("Slash commands have been synced.")
+
+    # 매새지를 받을때마다 실행
+    async def on_message(self, message):
+        global bandict
+
+        # 추가로 필요한 변수 목록
+        writer = message.author  # 매세지 작성자
+        toxic = int(censorship(message.content)*100)  # 매세지의 위험 정도
+
+        # 봇 자신이 보낸 메시지는 무시
+        if writer == self.user:
+            return
+
+        if isinstance(message.channel, discord.DMChannel):
+            # DM에서는 메시지 삭제가 불가능하므로 실행 중지
+            return
+
+        # 평판이 깎인전적이 있고 밴당한 상태라면 채팅 금지
+        if writer in bandict and bandict[writer][0] > reputation_standard:
+            await message.delete()
+            await writer.send(f"❌채팅이 금지되었습니다.")
+            return
+
+        # 메시지 내용 출력
+        print(f"채팅 감지: {writer}: {message.content}")
+
+        # 검열
+        print(toxic)
+        if toxic >= ban_standard:
+            await message.delete()
+
+            # 평판 조정
+            if writer in bandict:
+                bandict[writer][0] += toxic//10
+            else:
+                bandict[writer] = [toxic//10]
+
+            # 검열 매세지 출력
+            await message.channel.send(f"🚫부적절한 표현이 감지되었습니다.")
+            await message.channel.send(f"현재 평판 {reputation_standard - bandict[writer][0]}입니다.")
+            if not 평판회복.is_running():  # 작업이 실행 중이 아닌 경우 시작
+                평판회복.start()
+
+            # 만일 평판이 0또는 음수라면 밴
+            if reputation_standard - bandict[writer][0] <= 0:
+                await message.channel.send(f"⛔{writer}님 채팅이 30분동안 금지되었습니다.")
+
+                # 밴 시간 및 횟수 추가
+                # 전적이 있다면 (밴당한 횟수 * 30분)만큼 밴
+                if len(bandict[writer]) > 1:
+                    bandict[writer][2] += 1
+                    bandict[writer][1] += ban_time*bandict[writer][2]
+
+                # 밴당한 적이 없다면 30분만 밴
+                else:
+                    bandict[writer].append(ban_time)
+                    bandict[writer].append(1)
+
+                # 밴 타이머 가동
+                if not 반복_작업.is_running():  # 작업이 실행 중이 아닌 경우 시작
+                    반복_작업.start()
+
+
+# 봇 객체 생성
+client = MyBot()
+
+"""명령어 모음"""
+
+
+# 평판 확인하는 명령어
+@client.tree.command(name="내평판")
+async def reputation(clients: discord.Interaction):
+    # 색깔 나눌 기준
+    color_st = reputation_standard/5
+
+    # 유저가 검열된적이 있다면 점수 측정 후 평판 돌려주기
+    if clients.user in bandict:
+        score = reputation_standard - bandict[clients.user][0]
+
+        # 밴 당한 상태라면 해제 시간도 보여주기
+        if score <= 0:
+            await clients.response.send_message(f"☠️{reputation_standard}점 만점에 {score}점 입니다." + "\n" +
+                                                f"{bandict[clients.user][1]}분 후 다시 채팅을 입력할 수 있습니다.",
+                                                ephemeral=True)
+
+        # 밴 당한 상태가 아니라면 현제 평판 계산해서 보여주기
+        else:
+            if 0 < score <= color_st:
+                color = "🔴"
+            elif color_st < score <= color_st*2:
+                color = "🟠"
+            elif color_st*2 < score <= color_st*3:
+                color = "🟡"
+            elif color_st*3 < score <= color_st*4:
+                color = "🟢"
+            elif color_st*4 < score < color_st*5:
+                color = "🔵"
+            elif color_st*5 == score:
+                color = "⚪"
+            print(color, score)
+            await clients.response.send_message(f"{color}{reputation_standard}점 만점에 {score}점 입니다", ephemeral=True)
+
+    # 채팅이 검열된적이 없다면 만점
+    else:
+        await clients.response.send_message(f"⚪{reputation_standard}점 만점에 {reputation_standard}점 입니다. ",
+                                            ephemeral=True)
+
+
+# 밴 해재시간에 대한 정보 제공
+@client.tree.command(name="해재시간")
+async def time(it):
+    # 시간, 분 가져오기
+    hour, minute = map(int, datetime.datetime.now().strftime("%H %M").split())
+
+    # 밴당하여 밴시간이 0이 아닌경우 몇시에 열리는지 계산
+    if it.user in bandict and bandict[it.user][1] != 0:
+        await it.response.send_message(
+            f"⏱️{(hour + (minute + bandict[it.user][1])//60)%12}:{(minute + bandict[it.user][1])%60}에 해재됩니다.",
+            ephemeral=True)
+
+    # 밴당하지 않았다면 시간 알림 없음
+    else:
+        await it.response.send_message("매세지밴을 당하지 않으셨습니다.")
+
+
+# 밴시간 확인 및 해제
+@tasks.loop(minutes=1)
+async def 반복_작업():
+    global bandict
+
+    # 밴당한 사람이 있나 확인
+    swith = True
+
+    # 채널 확인
+    channel = client.get_channel(1324237420798939156)  # 여기에 디스코드 채널 ID를 입력
+    if channel:
+
+        # 1분마다 밴 시간 1씩 감소
+        for i in bandict.keys():
+            if bandict[i][1] > 0:
+                swith = False
+            bandict[i][1] -= 1
+            if bandict[i][1] == 0:
+                bandict[i][0] = 0
+                await channel.send(f"🔓{i}님 채팅 금지가 해제되었습니다.")
+
+        # 더이상 밴당한 사람이 없다면 중지
+        if swith:
+            반복_작업.stop()
+
+
+# 평판 회복
+@tasks.loop(minutes=reputation_regeneration)
+async def 평판회복():
+    global bandict
+
+    # 평판이 회복 가능한 사람이 없는 경우 확인
+    swith = True
+
+    for i in bandict.keys():
+
+        # 밴당한 상태이거나 평판이 만점인 상태에서는 평판 회복 불가능
+        if 0 < bandict[i][0] < 20:
+            bandict[i][0] -= 1
+            swith = False
+
+    # 만일 없다면 실행 중지
+    if swith:
+        평판회복.stop()
+
+
+@bot.event
+async def on_ready():
+    print(f'{bot.user} 디스코드 준비 완료!')
+    print('-'*35)
+
+
+# /학생등록
+@client.tree.command(name="학생등록", description="student register")
+async def student_register(ctx: discord.Interaction, username: str, nickname: str):
+    guild = ctx.guild
+    member = discord.utils.get(guild.members, name=username)
+
+    if not member:
+        await ctx.response.send_message("이 유저는 서버에 존재하지 않습니다.")
+        return
+
+    elif member.bot:
+        await ctx.response.send_message("해당 유저는 봇입니다.")
+
+    elif username not in students:
+        await ctx.response.send_message("아직 학생 등록을 안하셨습니다.")
+
+        yes_button = discord.ui.Button(label="Yes", custom_id="yes", style=discord.ButtonStyle.success)
+        no_button = discord.ui.Button(label="No", custom_id="no", style=discord.ButtonStyle.danger)
+
+        async def button_callback(interaction: discord.Interaction):
+            if interaction.data['custom_id'] == 'yes':
+                students[username] = nickname
+                student_role = discord.utils.get(guild.roles, name="학생")
+                if not student_role:
+                    student_role = await guild.create_role(name="학생")
+
+                if student_role:
+                    await member.add_roles(student_role)
+
+                await interaction.response.send_message(f"{username}님을 성공적으로 학생으로 등록하였습니다!")
+            elif interaction.data['custom_id'] == 'no':
+                await interaction.response.send_message("취소 되었습니다.")
+
+            await interaction.message.edit(view=None)
+
+        yes_button.callback = button_callback
+        no_button.callback = button_callback
+
+        view = discord.ui.View()
+        view.add_item(yes_button)
+        view.add_item(no_button)
+
+        embed = discord.Embed(
+            title="‍🧑‍🎓 학생을 등록하시겠습니까?",
+            description=f"🆔 아이디: {username}\n 🎭 별명: {nickname}",
+            color=discord.Colour.blurple()
+        )
+
+        embed.set_footer(text=f"{formatted_dt}에 실행됨")
+        embed.set_author(name=ctx.user.name)
+
+        await ctx.followup.send(embed=embed, view=view)
+    else:
+        await ctx.response.send_message(f"{username}님은 이미 계정이 등록되어 있습니다.")
+
+
+# /강사등록
+@client.tree.command(name="강사등록", description="teacher register")
+async def teacher_register(ctx: discord.Interaction, username: str, nickname: str):
+    guild = ctx.guild
+    member = discord.utils.get(guild.members, name=username)
+
+    if not member:
+        await ctx.response.send_message("이 유저는 서버에 존재하지 않습니다.")
+
+    elif member.bot:
+        await ctx.response.send_message("해당 유저는 봇입니다.")
+
+    elif username not in students:
+        await ctx.response.send_message("아직 강사를 등록을 안하셨습니다.")
+
+        yes_button = discord.ui.Button(label="Yes", custom_id="yes", style=discord.ButtonStyle.success)
+        no_button = discord.ui.Button(label="No", custom_id="no", style=discord.ButtonStyle.danger)
+
+        async def button_callback(interaction: discord.Interaction):
+            if interaction.data['custom_id'] == 'yes':
+                teachers[username] = nickname
+                teacher_role = discord.utils.get(guild.roles, name="강사")
+                if not teacher_role:
+                    teacher_role = await guild.create_role(name="강사")
+                if teacher_role:
+                    await member.add_roles(teacher_role)
+                await interaction.response.send_message(f"{username}님을 성공적으로 강사로 등록하였습니다!")
+            elif interaction.data['custom_id'] == 'no':
+                await interaction.response.send_message("취소 되었습니다.")
+
+            await interaction.message.edit(view=None)
+
+        yes_button.callback = button_callback
+        no_button.callback = button_callback
+
+        view = discord.ui.View()
+        view.add_item(yes_button)
+        view.add_item(no_button)
+
+        embed = discord.Embed(
+            title="👨‍🏫 강사를 등록하시겠습니까?",
+            description=f"🆔 아이디: {username}\n 🎭 별명: {nickname}",
+            color=discord.Colour.blurple()
+        )
+
+        embed.set_footer(text=f"{formatted_dt}에 실행됨")
+        embed.set_author(name=ctx.user.name)
+
+        await ctx.send(embed=embed, view=view)
+    else:
+        await ctx.response.send_message(f"{username}님은 이미 계정이 등록되어 있습니다.")
+
+
+# /수업등록
+@client.tree.command(name="수업등록", description="lecture register (YYYY-MM-DD HH:MM)")
+async def register_class(ctx: discord.Interaction, date: str, time: str):
+    username = ctx.user.name
+
+    # 수업 시간을 파싱
+    time_obj = datetime.datetime.strptime(date + " " + time, "%Y-%m-%d %H:%M")
+    if now > time_obj:
+        await ctx.response.send_message('이미 지난 날짜입니다.')
+
+    # 서버의 모든 학생들 목록 가져오기
+    student_options = [discord.SelectOption(label=name, value=student) for student, name in students.items()]
+    if not student_options:
+        await ctx.response.send_message("등록된 학생이 없습니다.")
+
+    # 학생 선택 메뉴 생성 (다중 선택 가능)
+    student_select_menu = Select(
+        placeholder="학생을 선택하세요",
+        options=student_options,
+        min_values=1,  # 최소 1명 선택
+        max_values=len(student_options),  # 최대 학생 수
+    )
+
+    async def student_select_callback(interaction: discord.Interaction):
+        selected_students = student_select_menu.values
+
+        # 선생님 선택 메뉴 생성
+        teacher_options = [discord.SelectOption(label=name, value=teacher) for teacher, name in teachers.items()]
+        teacher_select_menu = Select(
+            placeholder="강사를 선택하세요",
+            options=teacher_options,
+            min_values=1,
+            max_values=1,
+        )
+
+        async def teacher_select_callback(inner_interaction: discord.Interaction):
+            selected_teacher = teacher_select_menu.values[0]
+
+            # 수업 등록 처리
+            for student in selected_students:
+                if student not in lecture:
+                    lecture[student] = [(time_obj, selected_teacher)]
+                else:
+                    lecture[student].append((time_obj, selected_teacher))
+
+            date_obj = datetime.datetime.strptime(date, "%Y-%m-%d")
+            clock_obj = datetime.datetime.strptime(time, "%H:%M")
+            formatted_date = date_obj.strftime("%Y년 %m월 %d일")
+            formatted_clock = clock_obj.strftime("%H:%M")
+
+            formatted_students = []
+            for student in selected_students:
+                formatted_students.append(students[student])
+
+            embed = discord.Embed(
+                title="새로운 수업이 등록 되었습니다!",
+                description=f"👨‍🏫 강사: {teachers[selected_teacher]}\n🧑‍🎓 학생(들): {', '.join(formatted_students)}\n📆 날짜: {formatted_date}\n ⏰ 시간: {formatted_clock}",
+                color=discord.Colour.green()
+            )
+
+            embed.set_footer(text=f"{formatted_dt}에 등록됨")
+            embed.set_author(name=username)
+
+            await inner_interaction.response.send_message(embed=embed)
+
+        teacher_select_menu.callback = teacher_select_callback
+        teacher_view = View()
+        teacher_view.add_item(teacher_select_menu)
+
+        await interaction.response.send_message("강사를 선택하세요:", view=teacher_view)
+
+    student_select_menu.callback = student_select_callback
+
+    # 학생 선택 뷰 생성 및 전송
+    student_view = View()
+    student_view.add_item(student_select_menu)
+    await ctx.response.send_message("학생을 선택하세요:", view=student_view)
+
+
+# /출석
+@client.tree.command(name="출석", description="attendance check")
+async def attendance(ctx: discord.Interaction):
+    username = ctx.user.name
+
+    # 학생이 등록되어 있는지 확인
+    if username not in students:
+        await ctx.response.send_message(f"{username}님은 등록된 학생이 아닙니다. 먼저 등록해주세요.")
+        return
+
+    # 해당 학생의 수업 정보 확인
+    if username not in lecture or not lecture[username]:
+        await ctx.response.send_message(f"{username}님은 등록된 수업이 없습니다.")
+        return
+
+    # 현재 시간 확인
+
+    lecture[username].sort()  # 수업 시간을 오름차순 정렬
+    next_lecture = lecture[username][0]  # 가장 가까운 수업 정보 가져오기
+    time, teacher = next_lecture  # 수업 시간과 강사 정보 분리
+
+    # 출결 기록 초기화
+    if username not in lecture_attendance:
+        lecture_attendance[username] = {'present': 0, 'absent': 0, 'late': 0}
+
+    # 수업 시간과 현재 시간 비교
+    if now >= time:
+        if (now - time) >= datetime.timedelta(minutes=5):  # 5분 이상 지각
+            await ctx.response.send_message(f"{username}님이 {teacher}의 수업에 지각하였습니다. ⏰")
+            lecture_attendance[username]['지각'] += 1
+        elif 0 <= (now - time) < datetime.timedelta(minutes=5):  # 정상 출석
+            await ctx.response.send_message(f"{username}님이 {teacher}의 수업에 출석하였습니다! ✅")
+            lecture_attendance[username]['출석'] += 1
+        lecture[username].pop(0)  # 출석 완료된 수업 제거
+    else:
+        # 수업 시작 전
+        await ctx.response.send_message(f"아직 {teacher}의 수업이 시작하지 않았습니다. 😢")
+
+
+# /수업목록
+@client.tree.command(name="수업목록", description="lecture list")
+async def lecture_list(ctx: discord.Interaction, username: str):
+    guild = ctx.guild
+    member = guild.get_member_named(username)
+    if not member:
+        await ctx.response.send_message('서버에 존재하지 않는 학생입니다.')
+    if username not in lecture:
+        await ctx.response.send_message('등록된 수업이 없습니다.')
+    else:
+        user_lectures = []
+        lecture[username].sort()
+        cnt = 0
+        for time_obj, teacher in lecture[username]:
+            cnt += 1
+            formatted_time = time_obj.strftime("%Y년 %m월 %d일 %H시 %M분")
+            user_lectures.append(f'{cnt}) 👨‍🏫 교사 : {teachers[teacher]}, 📆 수업 날짜 : {formatted_time}')
+
+        embed = discord.Embed(
+            title=f"📚 {students[username]}님의 수업 목록",
+            description=f'{username}님의 수업 목록 (총 {cnt}개)\n' + '\n'.join(user_lectures),
+            color=discord.Colour.green()
+        )
+
+        embed.set_footer(text=f"{formatted_dt}에 실행됨")
+        embed.set_author(name=username)
+
+        await ctx.response.send_message(embed=embed)
+
+
+# /반등록
+@client.tree.command(name="반등록", description="class register")
+async def register_class(ctx: discord.Interaction, class_name: str, day: str, time: str):
+    await ctx.response.defer(ephemeral=True)
+
+    username = ctx.user.name
+    guild = ctx.guild
+    weekdays = ["월요일", "화요일", "수요일", "목요일", "금요일", "토요일", "일요일"]
+    prefixed = ["월", "화", "수", "목", "금", "토", "일"]
+
+    if day not in weekdays and day not in prefixed:
+        await ctx.followup.send("잘못된 요일입니다.")
+        return
+    if class_name in classes:
+        await ctx.followup.send("같은 이름으로 등록된 반이 있습니다.")
+        return
+
+    # 서버의 모든 학생들 목록 가져오기
+    student_options = [discord.SelectOption(label=name, value=student) for student, name in students.items()]
+    if not student_options:
+        await ctx.followup.send("등록된 학생이 없습니다.")
+        return
+
+    # 학생 선택 메뉴 생성 (다중 선택 가능)
+    student_select_menu = Select(
+        placeholder="학생을 선택하세요",
+        options=student_options,
+        min_values=1,  # 최소 1명 선택
+        max_values=len(student_options),  # 최대 학생 수
+    )
+
+    async def student_select_callback(interaction: discord.Interaction):
+        selected_students = student_select_menu.values
+
+        # 선생님 선택 메뉴 생성
+        teacher_options = [discord.SelectOption(label=name, value=teacher) for teacher, name in teachers.items()]
+        teacher_select_menu = Select(
+            placeholder="강사를 선택하세요",
+            options=teacher_options,
+            min_values=1,
+            max_values=1,
+        )
+
+        async def teacher_select_callback(inner_interaction: discord.Interaction):
+            selected_teacher = teacher_select_menu.values[0]
+            classes[class_name] = [(selected_students, selected_teacher, day, time)]
+
+            # 수업 등록 처리
+            for student in selected_students:
+                member = guild.get_member_named(student)
+                if member:
+                    class_role = discord.utils.get(guild.roles, name=class_name)
+                    if not class_role:
+                        class_role = await guild.create_role(name=class_name)
+                    await member.add_roles(class_role)
+
+            formatted_students = [students[student] for student in selected_students]
+
+            embed = discord.Embed(
+                title=f"{class_name}",
+                description=f"👨‍🏫 강사: {selected_teacher}\n🧑‍🎓 학생(들): {', '.join(formatted_students)}\n📆 요일: {day}\n⏰ 시간: {time}",
+                color=discord.Colour.green()
+            )
+
+            embed.set_footer(text=f"{formatted_dt}에 실행됨")
+            embed.set_author(name=username)
+
+            await inner_interaction.response.send_message(embed=embed)  # 여기에서 응답 처리
+
+        teacher_select_menu.callback = teacher_select_callback
+        teacher_view = View()
+        teacher_view.add_item(teacher_select_menu)
+
+        await interaction.response.send_message("강사를 선택하세요:", view=teacher_view)
+
+    student_select_menu.callback = student_select_callback
+
+    # 학생 선택 뷰 생성 및 전송
+    student_view = View()
+    student_view.add_item(student_select_menu)
+    await ctx.followup.send("학생(들)을 선택하세요:", view=student_view)
+
+
+@client.tree.command(name="스톱워치", description="stopwatch")
+async def stopwatch(ctx: discord.Interaction, hour: int = 0, min: int = 0, sec: int = 0):
+    guild = ctx.guild
+    username = ctx.user.name
+    um = discord.utils.get(guild.members, name=username)
+    if username in students:
+        nick = students[username]
+    elif username in teachers:
+        nick = teachers[username]
+    else:
+        await ctx.response.send_message('계정이 등록되지 않았습니다. 먼저 등록해주세요.')
+        return
+
+    if hour + min + sec == 0:
+        await ctx.response.send_message('스톱워치의 최소시간은 1초입니다.')
+        return
+
+    members = [member for member in ctx.guild.members if not member.bot]  # 봇 제외
+    options = [
+        discord.SelectOption(label=member.display_name, value=str(member.id))
+        for member in members
+    ]
+
+    class UserSelect(Select):
+        def __init__(self):
+            super().__init__(
+                placeholder="알림을 받을 사람을 선택하세요!",
+                min_values=1,  # 최소 1명
+                max_values=len(members),  # 최대 선택 가능한 인원 수
+                options=options
+            )
+
+        async def callback(self, interaction: discord.Interaction):
+            nonlocal selected_users
+            selected_users = [interaction.guild.get_member(int(user_id)) for user_id in self.values]
+            await interaction.response.send_message(
+                f"선택된 유저: {', '.join([user.display_name for user in selected_users])}")
+            self.view.stop()
+
+    selected_users = []
+    view = View()
+    view.add_item(UserSelect())
+    print(dir(ctx))
+    await ctx.response.send_message("알림을 받을 사람을 선택하세요!", view=view)
+    await view.wait()
+
+    if not selected_users:
+        await ctx.followup.send("최소 1명의 유저를 선택해야 합니다.")
+        return
+
+    total_seconds = hour*3600 + min*60 + sec
+    mentions = ', '.join([user.mention for user in selected_users])  # 선택된 유저들의 멘션
+    embed = discord.Embed(
+        title=f"{nick}님의 알림",
+        description=f"⏰ 시간: {hour}시간 {min}분 {sec}초",
+        color=discord.Colour.red()
+    )
+
+    embed.set_footer(text=f"{formatted_dt}에 설정됨")
+    embed.set_author(name=', '.join([user.display_name for user in selected_users]))
+
+    await ctx.followup.send(embed=embed)
+
+    async def countdown():
+        await asyncio.sleep(total_seconds)
+        await ctx.followup.send(f'{mentions} 타이머가 끝났습니다!')
+
+    asyncio.create_task(countdown())
+
+
+@client.tree.command(name="출석표", description="attendance status")
+async def attendance_status(ctx: discord.Interaction, username: str):
+    print(lecture_attendance, 'start def')
+    if username not in lecture_attendance:
+        await ctx.response.send_message('출석 기록이 없습니다.')
+        return
+    if username not in students and username not in teachers:
+        await ctx.response.send_message('잘못된 유저입니다.')
+        return
+
+    # lecture_attendance[username] = {'출석': 0, '결석': 0, '지각': 0}
+    k = lecture_attendance[username]
+    present = k['present']
+    late = k['late']
+    absent = k['absent']
+
+    embed = discord.Embed(
+        title=f"{students[username]}님의 출석표",
+        description=f"✅ 출석: {present}\n❌ 결석: {absent}\n⌛ 지각: {late}",
+        color=discord.Colour.blurple()
+    )
+    embed.set_footer(text=f"{formatted_dt} 기준")
+    embed.set_author(name=username)
+    print(lecture_attendance,1)
+    await ctx.response.send_message(embed=embed)
+
+
+
+print(now)
+print(lecture_attendance, 'start code')
+client.run()
